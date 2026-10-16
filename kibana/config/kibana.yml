@@ -23,20 +23,25 @@ elasticsearch.password: ${KIBANA_SYSTEM_PASSWORD}
 ## https://www.elastic.co/docs/deploy-manage/security/self-setup
 ## https://www.elastic.co/docs/reference/kibana/commands/kibana-encryption-keys
 #
-#xpack.security.encryptionKey:
-#xpack.encryptedSavedObjects.encryptionKey:
-#xpack.reporting.encryptionKey:
+## Fleet requires xpack.encryptedSavedObjects.encryptionKey.
+## Do not change these keys once set (encrypted saved objects become unreadable).
+xpack.security.encryptionKey: c1e7e9ae067e84fbf7856967ef95a4ef23bb01402c82874885dfe5c0128baea1
+xpack.encryptedSavedObjects.encryptionKey: 409a9d777f464f0f943cfa18cdfe1a4b1fbe2ebc0385c56de78f64b08d47a974
+xpack.reporting.encryptionKey: bc9f7d77332ed31c1101850560ff1a1db83b320191309f4ca86d26b43ded39ac
 
 ## Fleet
 ## https://www.elastic.co/docs/reference/kibana/configuration-reference/fleet-settings
 #
-xpack.fleet.agents.fleet_server.hosts: [ http://fleet-server:8220 ]
+## Agents on remote hosts (e.g. the web server) cannot resolve the Docker-internal
+## names 'fleet-server' / 'elasticsearch', so the externally reachable address of
+## the ELK host is advertised instead.
+xpack.fleet.agents.fleet_server.hosts: [ http://192.168.219.126:8220 ]
 
 xpack.fleet.outputs:
   - id: fleet-default-output
     name: default
     type: elasticsearch
-    hosts: [ http://elasticsearch:9200 ]
+    hosts: [ http://192.168.219.126:9200 ]
     is_default: true
     is_default_monitoring: true
 
@@ -50,6 +55,11 @@ xpack.fleet.packages:
   - name: docker
     version: latest
   - name: apm
+    version: latest
+  # Web server log/metric integrations (ECS data streams + bundled dashboards)
+  - name: nginx
+    version: latest
+  - name: apache
     version: latest
 
 xpack.fleet.agentPolicies:

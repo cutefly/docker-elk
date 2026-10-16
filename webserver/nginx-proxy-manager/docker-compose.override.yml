@@ -1,0 +1,14 @@
+# NPM 타임존을 웹서버 호스트와 일치시키기 위한 override 파일
+#
+# NPM의 docker-compose.yml(또는 compose.yaml)과 같은 디렉터리에 두면
+# `docker compose up -d` 실행 시 자동으로 병합된다. 원본 compose 파일은 수정하지 않는다.
+#
+# ※ 서비스 이름 'app'은 NPM 공식 예제 기준이다. 실제 compose 파일의 서비스 이름과 다르면 맞춰서 바꾼다.
+#    확인: docker compose config --services
+services:
+  app:
+    environment:
+      TZ: Asia/Seoul            # 호스트 타임존 (timedatectl 로 확인한 값)
+    volumes:
+      # 컨테이너에 zoneinfo 데이터가 없어도 glibc가 호스트의 타임존 정보를 그대로 사용하도록 한다
+      - /etc/localtime:/etc/localtime:ro

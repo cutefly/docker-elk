@@ -1,0 +1,16 @@
+# Kibana Dev Tools - verify the ecs_combined format against the nginx integration pipeline
+# 1) Find the installed pipeline name (versioned, e.g. logs-nginx.access-<pkg-version>)
+GET _ingest/pipeline/logs-nginx.access*?filter_path=*.description
+
+# 2) Simulate (replace <PIPELINE> with the name found above)
+POST _ingest/pipeline/<PIPELINE>/_simulate
+{
+  "docs": [
+    { "_source": { "@timestamp": "2026-10-15T10:00:00.000+09:00",
+      "message": "app.example.com 203.0.113.10 - - [15/Oct/2026:10:00:00 +0900] \"GET /index.html?a=1 HTTP/1.1\" 200 512 \"-\" \"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36\"" } },
+    { "_source": { "@timestamp": "2026-10-15T10:00:01.000+09:00",
+      "message": "api.example.com 198.51.100.7 - admin [15/Oct/2026:10:00:01 +0900] \"POST /v1/login HTTP/2.0\" 401 87 \"https://app.example.com/\" \"curl/8.5.0\"" } }
+  ]
+}
+# Expected: destination.domain, source.ip, http.request.method, url.original,
+#           http.response.status_code, user_agent.* present; no error.message.

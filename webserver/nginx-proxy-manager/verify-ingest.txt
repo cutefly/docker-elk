@@ -1,0 +1,63 @@
+# Kibana Dev Tools — Phase 4 수집 검증 쿼리
+# 위에서부터 순서대로 실행하고 각 결과를 확인한다.
+
+# 1) data stream 생성 확인
+#    기대: logs-nginx.access-prod, logs-nginx.error-prod, metrics-nginx.stubstatus-prod,
+#          metrics-docker.*-prod, metrics-system.*-prod
+GET _data_stream/logs-nginx.*,metrics-nginx.*,metrics-docker.*,metrics-system.*?filter_path=data_streams.name
+
+# 2) 데이터셋별 최근 15분 문서 수 (0인 데이터셋이 있는지 확인)
+GET logs-nginx.*,metrics-nginx.*,metrics-docker.*,metrics-system.*/_search
+{
+  "size": 0,
+  "query": { "range": { "@timestamp": { "gte": "now-15m" } } },
+  "aggs": { "ds": { "terms": { "field": "data_stream.dataset", "size": 50 } } }
+}
+
+# 3) 파싱 실패 건수 — 기대: count 0
+GET logs-nginx.access-*/_count
+{ "query": { "exists": { "field": "error.message" } } }
+
+# 3-1) 실패가 있으면 원문 확인
+GET logs-nginx.access-*/_search?filter_path=hits.hits._source.event.original,hits.hits._source.error
+{ "size": 3, "query": { "exists": { "field": "error.message" } } }
+
+# 4) ECS 필드 확인 (최신 access 1건)
+#    기대: destination.domain, source.ip/geo, http.request.method, http.response.status_code,
+#          url.original, user_agent.name, host.name
+GET logs-nginx.access-*/_search?filter_path=hits.hits._source
+{
+  "size": 1,
+  "sort": [ { "@timestamp": "desc" } ],
+  "_source": [ "@timestamp", "destination.domain", "source.ip", "source.geo.country_iso_code",
+               "http.request.method", "http.response.status_code", "url.original",
+               "user_agent.name", "host.name", "event.timezone" ]
+}
+
+# 5) 시간 정합 — 수집 지연이 수 초~수십 초 이내인지, 미래 시각(+9h) 문서가 없는지
+#    기대: future_docs 0 (error 로그 포함)
+GET logs-nginx.*/_search
+{
+  "size": 0,
+  "aggs": {
+    "by_ds": { "terms": { "field": "data_stream.dataset" },
+      "aggs": {
+        "latest": { "max": { "field": "@timestamp" } },
+        "future_docs": { "filter": { "range": { "@timestamp": { "gt": "now+5m" } } } }
+      } }
+  }
+}
+
+# 6) 상관분석 키 일치 — nginx 로그와 system/docker 메트릭의 host.name이 같은지
+#    기대: 같은 host.name 하나에 세 데이터셋 그룹이 모두 존재
+GET logs-nginx.access-*,metrics-system.cpu-*,metrics-docker.cpu-*/_search
+{
+  "size": 0,
+  "query": { "range": { "@timestamp": { "gte": "now-15m" } } },
+  "aggs": { "host": { "terms": { "field": "host.name" },
+    "aggs": { "ds": { "terms": { "field": "data_stream.dataset" } } } } }
+}
+
+# 7) stub_status 메트릭 값 확인
+GET metrics-nginx.stubstatus-*/_search?filter_path=hits.hits._source.nginx
+{ "size": 1, "sort": [ { "@timestamp": "desc" } ] }
