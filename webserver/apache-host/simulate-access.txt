@@ -1,0 +1,42 @@
+# Kibana Dev Tools — apache Integration 파이프라인 파싱 검증 (P1, 설정 적용 전에 실행)
+# Integration 설치 후 실행한다 (kibana.yml의 xpack.fleet.packages에 apache: latest 선언됨).
+
+# 1) 설치된 파이프라인 이름 확인 (버전이 붙음, 예: logs-apache.access-<pkg-version>)
+GET _ingest/pipeline/logs-apache.*?filter_path=*.description
+
+# 2) access — 포맷 3종을 한 번에 시험 (<ACCESS_PIPELINE>을 1)에서 확인한 access 파이프라인 이름으로 바꾼다)
+#    doc[0] ecs_vhost_combined  "%v:%p %a ..."   ← 1순위 (ecs-logging.conf 기본값)
+#    doc[1] ecs_combined_noport "%v %a ..."      ← doc[0] 실패 시 2순위
+#    doc[2] ecs_combined        "%a ..."         ← 기준선 (vhost 구분 없음)
+#    doc[3] ecs_vhost_combined, IPv6 클라이언트, 응답 바이트 "-"
+POST _ingest/pipeline/<ACCESS_PIPELINE>/_simulate?filter_path=docs.doc._source.destination,docs.doc._source.source,docs.doc._source.http,docs.doc._source.url,docs.doc._source.user_agent.name,docs.doc._source.error
+{
+  "docs": [
+    { "_source": { "@timestamp": "2026-10-16T10:00:00.000+09:00",
+      "message": "app.example.com:443 203.0.113.10 - - [16/Oct/2026:10:00:00 +0900] \"GET /index.html?a=1 HTTP/1.1\" 200 512 \"-\" \"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36\"" } },
+    { "_source": { "@timestamp": "2026-10-16T10:00:01.000+09:00",
+      "message": "app.example.com 203.0.113.10 - - [16/Oct/2026:10:00:01 +0900] \"GET /index.html HTTP/1.1\" 200 512 \"-\" \"Mozilla/5.0\"" } },
+    { "_source": { "@timestamp": "2026-10-16T10:00:02.000+09:00",
+      "message": "198.51.100.7 - admin [16/Oct/2026:10:00:02 +0900] \"POST /v1/login HTTP/1.1\" 401 87 \"https://app.example.com/\" \"curl/8.5.0\"" } },
+    { "_source": { "@timestamp": "2026-10-16T10:00:03.000+09:00",
+      "message": "api.example.com:80 2001:db8::1 - - [16/Oct/2026:10:00:03 +0900] \"HEAD /health HTTP/1.1\" 304 - \"-\" \"kube-probe/1.30\"" } }
+  ]
+}
+# 판정 기준
+#   doc[0], doc[3]: destination.domain (+ destination.port), source.ip, http.request.method,
+#                   http.response.status_code, url.original 이 있고 error 가 없으면 → ecs_vhost_combined 사용 (기본값 유지)
+#   doc[0] 실패, doc[1] 성공 → ecs-logging.conf 의 GlobalLog 포맷을 ecs_combined_noport 로 변경
+#   doc[0], doc[1] 모두 실패 → ecs_combined 사용 (vhost 구분은 destination.domain 대신 host.name/tags 로)
+#   ※ doc[1] 형식은 "<도메인> <IP>" 가 "<IP1> <IP2>" 와 구분되지 않으므로, 도메인이 IP로 찍히는 경우가 없는지도 확인
+
+# 3) error — Apache 2.4 기본 ErrorLogFormat (<ERROR_PIPELINE>을 error 파이프라인 이름으로)
+POST _ingest/pipeline/<ERROR_PIPELINE>/_simulate?filter_path=docs.doc._source.log,docs.doc._source.source,docs.doc._source.message,docs.doc._source.error
+{
+  "docs": [
+    { "_source": { "@timestamp": "2026-10-16T10:00:00.000+09:00",
+      "message": "[Fri Oct 16 10:00:00.123456 2026] [core:error] [pid 1234:tid 140000000000000] [client 203.0.113.10:51234] AH00126: Invalid URI in request GET /%%% HTTP/1.1" } },
+    { "_source": { "@timestamp": "2026-10-16T10:00:01.000+09:00",
+      "message": "[Fri Oct 16 10:00:01.000001 2026] [mpm_event:notice] [pid 1000:tid 140000000000001] AH00489: Apache/2.4.58 (Ubuntu) configured -- resuming normal operations" } }
+  ]
+}
+# 기대: log.level (error / notice), source.ip(첫 문서), message 존재, error 없음

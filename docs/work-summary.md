@@ -35,7 +35,7 @@
 | NPM 서버 | Ubuntu + Docker, `jc21/nginx-proxy-manager`. 외부 트래픽의 진입점 |
 | nginx 서버 | NPM과 **다른** Ubuntu 서버, apt로 설치한 nginx. NPM 뒤의 리버스 프록시 체인 |
 | 네트워크 | 모든 서버가 같은 네트워크에 있으며 웹서버에서 ELK의 8220·9200에 접속 가능 |
-| apache | 다음 단계 대상 (서버 위치 미정) |
+| apache 서버 | NPM·nginx와 **다른** Ubuntu 서버, apt로 설치한 apache2. NPM 뒤에 있음 (2026-10-16 확정) |
 
 ## 3. 수집 데이터 구조
 
@@ -147,6 +147,13 @@ nginx 작업으로 확인한 표준 절차다. 웹서버 종류와 관계없이 
 | `webserver/nginx-proxy-manager/diagnose-access.md` | access 로그 미수집 진단 절차 |
 | `webserver/nginx-host/conf.d/{ecs-logging,real-ip,nginx-status}.conf` | 호스트 nginx 설정 |
 | `webserver/nginx-host/install-agent-nginx-host.sh` | 호스트 nginx용 점검·설치 스크립트 |
+| `docs/apache-host-procedure.md` | 호스트 apache2 절차 (P1~P8, 문제 해결 포함) |
+| `webserver/apache-host/conf-available/{ecs-logging,ecs-real-ip,ecs-server-status}.conf` | 호스트 apache2 설정 |
+| `webserver/apache-host/simulate-access.txt` | apache 포맷 3종 + error 파싱 테스트 (Dev Tools) |
+| `webserver/apache-host/verify-ingest.txt` | apache 수집 검증 1~8단계 (Dev Tools) |
+| `webserver/apache-host/install-agent-apache-host.sh` | 호스트 apache2용 점검·설치 스크립트 |
+| `docs/response-time.md` | 응답시간 수집 (로그 접미어 + `@custom` 파이프라인, nginx·NPM·apache 공통) |
+| `webserver/common/response-time.txt` | 응답시간용 `@custom` 매핑·파이프라인, `_simulate`, 확인 쿼리 (Dev Tools) |
 
 ## 8. 문제 사례와 교훈
 
@@ -162,41 +169,25 @@ nginx 작업으로 확인한 표준 절차다. 웹서버 종류와 관계없이 
 
 ---
 
-## 9. apache 적용 계획 (공통 패턴 기준)
+## 9. apache 작업 내역 (공통 패턴 적용)
 
-전제: Ubuntu에 apt로 설치한 apache2. 컨테이너라면 NPM 절차처럼 로그 볼륨 경로와 타임존(P5)을 추가로 점검한다. 아래 설정은 초안이며 **P1의 `_simulate` 검증을 통과한 뒤 적용**한다.
+환경: NPM·nginx와 **다른** Ubuntu 서버, apt로 설치한 apache2, NPM 뒤에 있음. 세부 절차는 `docs/apache-host-procedure.md`에 있다. 파일은 모두 작성했고, **서버 적용과 검증은 아직 하지 않았다.**
 
-| 패턴 | apache 적용 내용 |
-|---|---|
-| P1 로그 포맷 | Ubuntu에 기본 정의된 `vhost_combined`(`%v:%p` 접두어 + combined)를 기반으로 한다. Integration 기본 경로에 `other_vhosts_access.log`가 포함되어 있어 이 포맷 계열을 지원하는 것으로 보이지만, `_simulate`로 확인한다. 프록시 뒤라면 `%h` 대신 `%a`를 쓴다(P3). |
-| P2 상속 | `<VirtualHost>`에 자체 `CustomLog`가 있으면 전역 `CustomLog`를 이어받지 않는다. 해당 vhost에 직접 추가한다. |
-| P3 실제 IP | `mod_remoteip`: `RemoteIPHeader X-Forwarded-For`, `RemoteIPInternalProxy <NPM 서버 IP>`. 로그 포맷은 `%a` 사용 |
-| P4 상태 | Ubuntu 기본 `mods-enabled/status.conf`(`/server-status`, `Require local`)를 사용한다. 필요하면 전용 포트(`Listen 127.0.0.1:8080`)의 VirtualHost로 분리한다. |
-| P5 타임존 | 호스트에 설치하면 영향 없음. error log에는 타임존이 없으므로 컨테이너라면 맞춘다. |
-| P6 정책 | 다른 서버라면 `Apache Host Policy` (system + apache, tags `apache-host`) |
-| P7 설치 | `install-agent-nginx-host.sh`를 apache용으로 바꾼 스크립트 사용 (점검 항목: `apache2ctl -M`, `configtest`, `/server-status`) |
-| P8 검증 | `verify-ingest.txt`의 `nginx`를 `apache`로 바꿔 실행. 대시보드는 `[Logs Apache] Access and error logs`, `[Metrics Apache] Overview` |
+| 패턴 | apache 적용 내용 | 상태 |
+|---|---|---|
+| P1 로그 포맷 | `ecs_vhost_combined` (`%v:%p %a` + combined). 실패에 대비해 `ecs_combined_noport`, `ecs_combined`도 함께 정의. `simulate-access.txt`로 3종을 한 번에 판정 | **완료** — 3종 모두 통과(패키지 3.0.2), `ecs_vhost_combined` 확정. error 포맷도 통과 |
+| P2 상속 | **`GlobalLog`(2.4.19+)** 를 사용해 자체 `CustomLog`가 있는 vhost도 모두 기록. 사이트 파일 수정 불필요 | 파일 제공 |
+| P3 실제 IP | `ecs-real-ip.conf`: `mod_remoteip`, `RemoteIPInternalProxy <NPM 서버 IP>`. 로그는 `%a` | 파일 제공 |
+| P4 상태 | `ecs-server-status.conf`: `127.0.0.1:8080/server-status` 전용 VirtualHost, `ExtendedStatus On`. 폴링 요청은 `ecs_nolog`로 수집 로그에서 제외 | 파일 제공 |
+| P5 타임존 | 호스트 설치라 영향 없음 | 해당 없음 |
+| P6 정책 | `Apache Host Policy` (system + apache, tags `apache-host`) | 절차 제공 |
+| P7 설치 | `install-agent-apache-host.sh` (버전·모듈·configtest·placeholder·8080 충돌·server-status 점검 후 설치) | 스크립트 제공 |
+| P8 검증 | `webserver/apache-host/verify-ingest.txt` 1~8단계 (실제 IP 분포, 폴링 제외, nginx와 함께 보기 포함) | 쿼리 제공 |
 
-설정 초안 (`/etc/apache2/conf-available/ecs-logging.conf` → `a2enconf ecs-logging`):
+nginx 설계와 달라진 점:
 
-```apache
-# NPM 뒤에 있는 경우: 실제 사용자 IP 복원 (a2enmod remoteip)
-<IfModule remoteip_module>
-    RemoteIPHeader X-Forwarded-For
-    RemoteIPInternalProxy <NPM_SERVER_IP>
-</IfModule>
-
-# vhost_combined 기반, %h → %a (remoteip 적용 후 실제 IP)
-LogFormat "%v:%p %a %l %u %t \"%r\" %>s %O \"%{Referer}i\" \"%{User-Agent}i\"" ecs_vhost_combined
-CustomLog ${APACHE_LOG_DIR}/ecs_access.log ecs_vhost_combined
-```
-
-Fleet의 apache Integration 입력값은 다음과 같다.
-
-- Access 경로: `/var/log/apache2/ecs_access.log*`
-- Error 경로: `/var/log/apache2/error.log*`
-- Status Hosts: `http://127.0.0.1` (전용 포트로 분리했다면 `:8080`)
-- Status path: `/server-status`
+- **P2:** vhost마다 줄을 추가하는 방식 대신 `GlobalLog`를 쓴다.
+- **P4:** 기본 사이트의 `/server-status` 대신 전용 포트를 쓴다. 사이트에 `ProxyPass /`가 있으면 기본 사이트에서는 404가 나기 때문이다.
 
 nginx와 apache가 같은 ECS 필드로 저장되므로 `event.dataset : (nginx.access or apache.access)`로 함께 분석할 수 있다.
 
@@ -211,6 +202,7 @@ nginx와 apache가 같은 ECS 필드로 저장되므로 `event.dataset : (nginx.
 | 3 | nginx 서버: `/nginx_status` 404 진단 (`curl -i :8080`, `nginx -T`, `ss -ltnp` 결과 전달) | 사용자 → 원인 판정 |
 | 4 | nginx 서버: real-ip 적용과 위조 시험, `Nginx Host Policy` 생성, Agent 설치, 검증 | 사용자 |
 | 5 | 정책 JSON 백업 (P9) | 사용자 |
-| 6 | apache: 서버 위치와 형태 확인 → 설정 파일과 스크립트 작성 → P1 `_simulate` 검증부터 진행 | 다음 단계 |
+| 6 | apache: P1 완료(`ecs_vhost_combined`). `apache-host-procedure.md` Step 2~6 진행 (점검 → 설정 적용 → 정책 → Agent → 검증) | 사용자 실행, `--check-only` 결과 전달 |
+| 6-1 | 응답시간: `response-time.txt` A~C 실행 → `_simulate` 결과 전달 → 통과하면 태그 추가, 로그 포맷 변경 (`docs/response-time.md`) | 사용자 실행, 결과 전달 |
 | 7 | 운영 보안: `.env` 기본 비밀번호 변경, Fleet 서비스 토큰 사용, TLS 적용(`--insecure` 제거) 검토 | 운영 전 |
 | 8 | 저장소 관리: `kibana.yml`에 암호화 키가 들어 있으므로 원격 저장소에 push하지 않거나 별도로 관리. 이전 작업의 빈 폴더(`.local-work/`, `apache access log/`) 정리 여부 결정 | 사용자 결정 |

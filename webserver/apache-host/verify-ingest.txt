@@ -1,0 +1,84 @@
+# Kibana Dev Tools — apache 수집 검증 쿼리 (P8)
+# nginx용 verify-ingest.txt와 같은 순서다. 위에서부터 차례로 실행한다.
+# <APACHE_HOST>는 apache 서버의 hostname (host.name)으로 바꾼다.
+
+# 1) data stream 생성 확인
+#    기대: logs-apache.access-<ns>, logs-apache.error-<ns>, metrics-apache.status-<ns>, metrics-system.*-<ns>
+GET _data_stream/logs-apache.*,metrics-apache.*?filter_path=data_streams.name
+
+# 2) 데이터셋별 최근 15분 문서 수 (이 서버 기준, 0인 데이터셋이 있는지 확인)
+GET logs-apache.*,metrics-apache.*,metrics-system.*/_search
+{
+  "size": 0,
+  "query": { "bool": { "filter": [
+    { "range": { "@timestamp": { "gte": "now-15m" } } },
+    { "term": { "host.name": "<APACHE_HOST>" } } ] } },
+  "aggs": { "ds": { "terms": { "field": "data_stream.dataset", "size": 50 } } }
+}
+
+# 3) 파싱 실패 건수 — 기대: count 0
+GET logs-apache.*/_count
+{ "query": { "exists": { "field": "error.message" } } }
+
+# 3-1) 실패가 있으면 원문 확인
+GET logs-apache.*/_search?filter_path=hits.hits._source.event.original,hits.hits._source.error
+{ "size": 3, "query": { "exists": { "field": "error.message" } } }
+
+# 4) ECS 필드 확인 (최신 access 1건)
+#    기대: destination.domain, source.ip/geo(실제 사용자 IP, NPM IP가 아님), http.*, url.original,
+#          user_agent.name, host.name, tags=apache-host
+GET logs-apache.access-*/_search?filter_path=hits.hits._source
+{
+  "size": 1,
+  "sort": [ { "@timestamp": "desc" } ],
+  "_source": [ "@timestamp", "tags", "destination.domain", "destination.port", "source.ip",
+               "source.geo.country_iso_code", "http.request.method", "http.response.status_code",
+               "url.original", "user_agent.name", "host.name", "event.timezone" ]
+}
+
+# 4-1) source.ip 상위 값 — NPM 서버 IP가 대부분이면 mod_remoteip 미적용
+GET logs-apache.access-*/_search
+{
+  "size": 0,
+  "query": { "range": { "@timestamp": { "gte": "now-1h" } } },
+  "aggs": { "ip": { "terms": { "field": "source.ip", "size": 5 } } }
+}
+
+# 4-2) server-status 폴링이 access 로그에 섞이지 않았는지 — 기대: count 0
+GET logs-apache.access-*/_count
+{ "query": { "prefix": { "url.original": "/server-status" } } }
+
+# 5) 시간 정합 — 미래 시각 문서 0건 (error 로그는 타임존이 없어 Agent의 호스트 타임존으로 해석된다)
+GET logs-apache.*/_search
+{
+  "size": 0,
+  "aggs": {
+    "by_ds": { "terms": { "field": "data_stream.dataset" },
+      "aggs": {
+        "latest": { "max": { "field": "@timestamp" } },
+        "future_docs": { "filter": { "range": { "@timestamp": { "gt": "now+5m" } } } }
+      } }
+  }
+}
+
+# 6) 상관분석 키 — apache 로그와 system 메트릭의 host.name 일치
+GET logs-apache.access-*,metrics-system.cpu-*/_search
+{
+  "size": 0,
+  "query": { "range": { "@timestamp": { "gte": "now-15m" } } },
+  "aggs": { "host": { "terms": { "field": "host.name" },
+    "aggs": { "ds": { "terms": { "field": "data_stream.dataset" } } } } }
+}
+
+# 7) status 메트릭 값 확인 (workers, total_accesses 등)
+GET metrics-apache.status-*/_search?filter_path=hits.hits._source.apache
+{ "size": 1, "sort": [ { "@timestamp": "desc" } ] }
+
+# 8) nginx와 함께 보기 — 같은 ECS 필드로 저장되었는지
+GET logs-nginx.access-*,logs-apache.access-*/_search
+{
+  "size": 0,
+  "query": { "range": { "@timestamp": { "gte": "now-1h" } } },
+  "aggs": { "ds": { "terms": { "field": "event.dataset" },
+    "aggs": { "status": { "terms": { "field": "http.response.status_code" } } } } }
+}

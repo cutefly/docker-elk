@@ -1,0 +1,175 @@
+# Kibana Dev Tools — 웹서버 응답시간 수집 (nginx·NPM·apache 공통)
+# 절차 설명: docs/response-time.md
+# 순서: A(매핑) → B(@custom 파이프라인) → C(_simulate) → D(rollover) → 이후 Fleet 태그 추가, 서버 로그 포맷 변경
+# 모두 Fleet이 제공하는 @custom 확장 지점만 사용한다. Integration 기본 파이프라인·템플릿은 수정하지 않는다.
+
+############################################################
+# A. 매핑 (@custom component template)
+#    먼저 기존 내용을 확인한다. 이미 사용자 설정이 있으면 그 내용에 아래 properties를 합쳐서 PUT 한다.
+############################################################
+GET _component_template/logs-nginx.access@custom,logs-apache.access@custom
+
+PUT _component_template/logs-nginx.access@custom
+{
+  "template": {
+    "mappings": {
+      "properties": {
+        "event":     { "properties": { "duration": { "type": "long" } } },
+        "webserver": { "properties": { "upstream_duration": { "type": "long" } } }
+      }
+    }
+  }
+}
+
+PUT _component_template/logs-apache.access@custom
+{
+  "template": {
+    "mappings": {
+      "properties": {
+        "event": { "properties": { "duration": { "type": "long" } } }
+      }
+    }
+  }
+}
+
+############################################################
+# B. @custom ingest pipeline
+#    Integration 기본 파이프라인의 마지막 단계에서 자동으로 호출된다.
+#    로그 줄 끝의 rt= / urt= 를 event.original 에서 읽는다.
+#    접미어가 없는 줄(포맷 변경 전 로그)은 아무 처리 없이 통과한다.
+############################################################
+PUT _ingest/pipeline/logs-nginx.access@custom
+{
+  "description": "응답시간: rt=$request_time(초) → event.duration(ns), urt=\"$upstream_response_time\" → webserver.upstream_duration(ns)",
+  "processors": [
+    { "grok": {
+        "field": "event.original",
+        "patterns": [ " rt=%{NUMBER:_ws.rt} urt=\"%{DATA:_ws.urt}\"$" ],
+        "ignore_missing": true, "ignore_failure": true } },
+    { "script": {
+        "if": "ctx._ws != null",
+        "source": """
+          if (ctx._ws.rt != null) {
+            if (ctx.event == null) { ctx.event = [:]; }
+            ctx.event.duration = Math.round(Double.parseDouble(ctx._ws.rt) * 1000000000L);
+          }
+          if (ctx._ws.urt != null) {
+            // 여러 upstream을 거치면 "0.010, 0.020" 또는 "0.010 : 0.020" 형태 → 합산. "-"는 upstream 없음
+            double total = 0; boolean found = false;
+            for (def p : ctx._ws.urt.replace(':', ',').splitOnToken(',')) {
+              String t = p.trim();
+              if (t.length() > 0 && !t.equals('-')) { total += Double.parseDouble(t); found = true; }
+            }
+            if (found) {
+              if (ctx.webserver == null) { ctx.webserver = [:]; }
+              ctx.webserver.upstream_duration = Math.round(total * 1000000000L);
+            }
+          }
+          ctx.remove('_ws');
+        """,
+        "ignore_failure": true } },
+    { "remove": {
+        "field": "event.original", "ignore_missing": true,
+        "if": "ctx.tags instanceof List && ctx.tags.contains('preserve_original_event')" } },
+    { "script": {
+        "if": "ctx.tags instanceof List",
+        "source": "ctx.tags.removeIf(t -> t == 'preserve_original_event')" } }
+  ]
+}
+
+PUT _ingest/pipeline/logs-apache.access@custom
+{
+  "description": "응답시간: rt=%D(마이크로초) → event.duration(ns)",
+  "processors": [
+    { "grok": {
+        "field": "event.original",
+        "patterns": [ " rt=%{NUMBER:_ws.rt}$" ],
+        "ignore_missing": true, "ignore_failure": true } },
+    { "script": {
+        "if": "ctx._ws != null",
+        "source": """
+          if (ctx._ws.rt != null) {
+            if (ctx.event == null) { ctx.event = [:]; }
+            ctx.event.duration = Long.parseLong(ctx._ws.rt) * 1000L;
+          }
+          ctx.remove('_ws');
+        """,
+        "ignore_failure": true } },
+    { "remove": {
+        "field": "event.original", "ignore_missing": true,
+        "if": "ctx.tags instanceof List && ctx.tags.contains('preserve_original_event')" } },
+    { "script": {
+        "if": "ctx.tags instanceof List",
+        "source": "ctx.tags.removeIf(t -> t == 'preserve_original_event')" } }
+  ]
+}
+
+############################################################
+# C. _simulate — Integration 기본 파이프라인 전체(@custom 호출 포함)로 실행
+#    nginx 파이프라인 이름 확인:  GET _ingest/pipeline/logs-nginx.access*?filter_path=*.description
+#    tags 에 preserve_original_event 를 넣는 것은 Fleet 태그 설정(Step 3)과 같은 상태를 재현한 것이다.
+############################################################
+POST _ingest/pipeline/<NGINX_ACCESS_PIPELINE>/_simulate?filter_path=docs.doc._source.destination.domain,docs.doc._source.source.ip,docs.doc._source.http.response.status_code,docs.doc._source.user_agent.original,docs.doc._source.event.duration,docs.doc._source.event.original,docs.doc._source.webserver,docs.doc._source.tags,docs.doc._source.error
+{
+  "docs": [
+    { "_source": { "@timestamp": "2026-10-16T10:00:00.000+09:00", "tags": ["nginx-host", "preserve_original_event"],
+      "message": "app.example.com 203.0.113.10 - - [16/Oct/2026:10:00:00 +0900] \"GET /api/items HTTP/1.1\" 200 512 \"-\" \"Mozilla/5.0 (X11; Linux x86_64) Chrome/130.0\" rt=0.153 urt=\"0.150\"" } },
+    { "_source": { "@timestamp": "2026-10-16T10:00:01.000+09:00", "tags": ["nginx-host", "preserve_original_event"],
+      "message": "app.example.com 203.0.113.10 - - [16/Oct/2026:10:00:01 +0900] \"GET /api/retry HTTP/1.1\" 502 157 \"-\" \"curl/8.5.0\" rt=3.012 urt=\"3.001, 0.008\"" } },
+    { "_source": { "@timestamp": "2026-10-16T10:00:02.000+09:00", "tags": ["nginx-host", "preserve_original_event"],
+      "message": "app.example.com 203.0.113.10 - - [16/Oct/2026:10:00:02 +0900] \"GET /favicon.ico HTTP/1.1\" 200 1150 \"-\" \"curl/8.5.0\" rt=0.000 urt=\"-\"" } },
+    { "_source": { "@timestamp": "2026-10-16T10:00:03.000+09:00", "tags": ["nginx-host"],
+      "message": "app.example.com 203.0.113.10 - - [16/Oct/2026:10:00:03 +0900] \"GET /old HTTP/1.1\" 200 10 \"-\" \"curl/8.5.0\"" } }
+  ]
+}
+# 기대
+#   공통: destination.domain, source.ip, status_code 정상. user_agent.original 에 rt= 가 섞이지 않음. error 없음.
+#         event.original 과 preserve_original_event 태그는 남지 않음.
+#   doc[0] event.duration=153000000, webserver.upstream_duration=150000000
+#   doc[1] event.duration=3012000000, webserver.upstream_duration=3009000000 (합산)
+#   doc[2] event.duration=0, webserver 없음
+#   doc[3] (포맷 변경 전 로그) event.duration 없음, 오류 없음
+
+POST _ingest/pipeline/logs-apache.access-3.0.2/_simulate?filter_path=docs.doc._source.destination,docs.doc._source.source.ip,docs.doc._source.http.response.status_code,docs.doc._source.user_agent.original,docs.doc._source.event.duration,docs.doc._source.event.original,docs.doc._source.tags,docs.doc._source.error
+{
+  "docs": [
+    { "_source": { "@timestamp": "2026-10-16T10:00:00.000+09:00", "tags": ["apache-host", "preserve_original_event"],
+      "message": "app.example.com:443 203.0.113.10 - - [16/Oct/2026:10:00:00 +0900] \"GET /index.php HTTP/1.1\" 200 512 \"-\" \"Mozilla/5.0 (X11; Linux x86_64) Chrome/130.0\" rt=153204" } },
+    { "_source": { "@timestamp": "2026-10-16T10:00:01.000+09:00", "tags": ["apache-host"],
+      "message": "app.example.com:443 203.0.113.10 - - [16/Oct/2026:10:00:01 +0900] \"GET /old HTTP/1.1\" 200 10 \"-\" \"curl/8.5.0\"" } }
+  ]
+}
+# 기대: doc[0] event.duration=153204000, user_agent.original 에 rt= 없음, error 없음 / doc[1] 오류 없이 통과
+
+############################################################
+# D. 새 매핑을 적용하기 위한 rollover (A의 매핑은 다음 backing index부터 적용된다)
+#    <ns> 는 정책의 namespace (default, prod 등)
+############################################################
+POST logs-nginx.access-<ns>/_rollover
+POST logs-apache.access-<ns>/_rollover
+
+############################################################
+# E. 수집 후 확인 — 도메인별 응답시간 (ms 환산)
+############################################################
+GET logs-nginx.access-*,logs-apache.access-*/_search
+{
+  "size": 0,
+  "query": { "bool": { "filter": [
+    { "range": { "@timestamp": { "gte": "now-1h" } } },
+    { "exists": { "field": "event.duration" } } ] } },
+  "aggs": { "ds": { "terms": { "field": "event.dataset" },
+    "aggs": { "domain": { "terms": { "field": "destination.domain", "size": 10 },
+      "aggs": {
+        "p50_p95_p99_ns": { "percentiles": { "field": "event.duration", "percents": [50, 95, 99] } },
+        "upstream_p95_ns": { "percentiles": { "field": "webserver.upstream_duration", "percents": [95] } }
+      } } } } }
+}
+
+# E-1. 최신 문서에 event.original 과 preserve_original_event 태그가 남지 않았는지 (_source 직접 확인)
+#      (event.original 은 색인하지 않는 필드라 exists 쿼리로는 확인할 수 없다)
+GET logs-nginx.access-*,logs-apache.access-*/_search?filter_path=hits.hits._index,hits.hits._source
+{
+  "size": 3,
+  "sort": [ { "@timestamp": "desc" } ],
+  "_source": [ "event.original", "event.duration", "webserver.upstream_duration", "tags" ]
+}
