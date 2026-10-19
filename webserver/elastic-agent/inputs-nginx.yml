@@ -1,0 +1,29 @@
+  # nginx Integration과 같은 data stream 이름을 쓴다.
+  #   logs-nginx.access-<namespace>, logs-nginx.error-<namespace>
+  # 파싱은 ES의 Integration ingest pipeline이 맡으므로 여기서는 원문만 보낸다.
+  - id: filestream-nginx
+    type: filestream
+    use_output: default
+    data_stream:
+      namespace: __NAMESPACE__
+    streams:
+      - id: filestream-nginx-nginx.access
+        data_stream:
+          type: logs
+          dataset: nginx.access
+        paths:
+          - __NGINX_ACCESS_PATH__
+        prospector.scanner.exclude_files: ['\.gz$']
+        tags: [nginx-access]
+        processors:
+          - add_locale: ~
+      - id: filestream-nginx-nginx.error
+        data_stream:
+          type: logs
+          dataset: nginx.error
+        paths:
+          - __NGINX_ERROR_PATH__
+        prospector.scanner.exclude_files: ['\.gz$']
+        tags: [nginx-error]
+        processors:
+          - add_locale: ~

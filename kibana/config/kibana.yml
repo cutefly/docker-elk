@@ -51,6 +51,12 @@ xpack.fleet.packages:
     version: latest
   - name: apm
     version: latest
+  # 웹서버 로그: Fleet Server 없이 Integration 자산(index template, ingest pipeline,
+  # 대시보드)만 설치해서 쓴다. 데이터는 Elastic Agent standalone → Logstash로 들어온다.
+  - name: nginx
+    version: latest
+  - name: apache
+    version: latest
 
 xpack.fleet.agentPolicies:
   - name: Fleet Server Policy

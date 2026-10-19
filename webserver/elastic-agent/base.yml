@@ -1,0 +1,22 @@
+# Elastic Agent standalone 설정 (Fleet 미사용)
+# install-agent.sh가 이 파일 뒤에 inputs-*.yml을 붙여서 elastic-agent.yml을 만든다.
+# __LOGSTASH_HOSTS__는 설치 스크립트가 실제 주소로 바꾼다.
+
+outputs:
+  default:
+    type: logstash
+    hosts: [__LOGSTASH_HOSTS__]
+    # 운영 환경에서는 TLS를 권장한다(Logstash input에도 ssl 설정이 필요하다).
+    # ssl.certificate_authorities: ["/etc/elastic-agent/ca.crt"]
+
+agent:
+  monitoring:
+    # Agent 자체 로그·메트릭도 같은 output(Logstash)으로 보낸다.
+    # → logs-elastic_agent*, metrics-elastic_agent.* data stream
+    enabled: true
+    use_output: default
+    namespace: default
+    logs: true
+    metrics: true
+
+inputs:

@@ -1,0 +1,71 @@
+# Kibana > Dev Tools 에 붙여넣고 위에서부터 하나씩 실행하세요.
+# apache만 쓰면 nginx를 apache로 바꿔서 실행하면 됩니다.
+
+# ── 1. Integration 자산이 설치됐는지 확인 ─────────────────────────
+# status가 "installed"이고 version이 보여야 합니다.
+GET kbn:/api/fleet/epm/packages/nginx
+GET kbn:/api/fleet/epm/packages/apache
+
+# index template에 default_pipeline(logs-nginx.access-<버전>)이 있어야 합니다.
+GET _index_template/logs-nginx.access?filter_path=index_templates.index_template.template.settings.index.default_pipeline
+GET _index_template/logs-apache.access?filter_path=index_templates.index_template.template.settings.index.default_pipeline
+
+# ingest pipeline 목록
+GET _ingest/pipeline/logs-nginx.*?filter_path=*.description
+GET _ingest/pipeline/logs-apache.*?filter_path=*.description
+
+# ── 2. 파싱 테스트(데이터 없이 pipeline만 검사) ───────────────────
+# index 이름을 쓰면 template의 default_pipeline으로 simulate 합니다.
+POST _ingest/_simulate?filter_path=docs.doc._source.source.ip,docs.doc._source.http,docs.doc._source.url.original,docs.doc._source.error,docs.doc._index
+{
+  "docs": [
+    {
+      "_index": "logs-nginx.access-default",
+      "_source": {
+        "@timestamp": "2026-10-19T00:00:00Z",
+        "message": "10.0.0.1 - - [19/Oct/2026:10:00:00 +0900] \"GET /index.html HTTP/1.1\" 200 612 \"-\" \"curl/8.5.0\"",
+        "data_stream": { "type": "logs", "dataset": "nginx.access", "namespace": "default" },
+        "event": { "timezone": "+09:00" }
+      }
+    },
+    {
+      "_index": "logs-apache.access-default",
+      "_source": {
+        "@timestamp": "2026-10-19T00:00:00Z",
+        "message": "10.0.0.1 - - [19/Oct/2026:10:00:00 +0900] \"GET /index.html HTTP/1.1\" 200 10918 \"-\" \"curl/8.5.0\"",
+        "data_stream": { "type": "logs", "dataset": "apache.access", "namespace": "default" },
+        "event": { "timezone": "+09:00" }
+      }
+    }
+  ]
+}
+# 기대: source.ip=10.0.0.1, http.response.status_code=200, error 필드 없음
+
+# ── 3. Logstash 권한 확인 ─────────────────────────────────────────
+# indices에 logs-*-* / metrics-*-* (auto_configure, create_doc)가 보여야 합니다.
+GET _security/role/logstash_writer
+
+# ── 4. data stream 생성 확인 ──────────────────────────────────────
+# template 값이 logs-nginx.access 이어야 합니다. "logs"면 자산 설치 전에 데이터가 들어온 것입니다.
+GET _data_stream/logs-nginx.*?filter_path=data_streams.name,data_streams.template
+GET _data_stream/logs-apache.*?filter_path=data_streams.name,data_streams.template
+
+# ── 5. 실제 문서 확인 ─────────────────────────────────────────────
+GET logs-nginx.access-*/_count
+GET logs-apache.access-*/_count
+
+GET logs-nginx.access-*/_search
+{
+  "size": 1,
+  "sort": [{ "@timestamp": "desc" }],
+  "_source": ["@timestamp", "host.name", "source.ip", "http", "url.original", "event.dataset", "error.message", "tags"]
+}
+
+# 파싱 실패 문서가 있는지 확인(0이어야 정상)
+GET logs-nginx.*,logs-apache.*/_count
+{
+  "query": { "exists": { "field": "error.message" } }
+}
+
+# ── 6. Agent 자체 모니터링 데이터(Agent가 Logstash까지 도달했는지) ──
+GET logs-elastic_agent*/_count

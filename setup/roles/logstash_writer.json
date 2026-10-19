@@ -28,6 +28,16 @@
         "write",
         "manage"
       ]
+    },
+    {
+      "names": [
+        "logs-*-*",
+        "metrics-*-*"
+      ],
+      "privileges": [
+        "auto_configure",
+        "create_doc"
+      ]
     }
   ]
 }

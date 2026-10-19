@@ -1,0 +1,29 @@
+  # apache Integration과 같은 data stream 이름을 쓴다.
+  #   logs-apache.access-<namespace>, logs-apache.error-<namespace>
+  # 파싱은 ES의 Integration ingest pipeline이 맡으므로 여기서는 원문만 보낸다.
+  - id: filestream-apache
+    type: filestream
+    use_output: default
+    data_stream:
+      namespace: __NAMESPACE__
+    streams:
+      - id: filestream-apache-apache.access
+        data_stream:
+          type: logs
+          dataset: apache.access
+        paths:
+          - __APACHE_ACCESS_PATH__
+        prospector.scanner.exclude_files: ['\.gz$']
+        tags: [apache-access]
+        processors:
+          - add_locale: ~
+      - id: filestream-apache-apache.error
+        data_stream:
+          type: logs
+          dataset: apache.error
+        paths:
+          - __APACHE_ERROR_PATH__
+        prospector.scanner.exclude_files: ['\.gz$']
+        tags: [apache-error]
+        processors:
+          - add_locale: ~
